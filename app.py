@@ -9,10 +9,9 @@ import plotly.express as px
 db_url = st.secrets["DB_URL"]
 engine = create_engine(db_url)
 conn = engine.raw_connection()
-conn.autocommit = True
 c = conn.cursor()
 
-# 初始化 PostgreSQL 数据表结构 (升级为 v2 表，增加单位和单件重量字段)
+# 初始化 PostgreSQL 数据表结构
 c.execute('''CREATE TABLE IF NOT EXISTS food_lib_v2 
              (name TEXT PRIMARY KEY, unit_name TEXT, weight_per_unit REAL, 
               cal_per_g REAL, pro_per_g REAL, fat_per_g REAL, carb_per_g REAL, fiber_per_g REAL)''')
@@ -23,6 +22,7 @@ c.execute('''CREATE TABLE IF NOT EXISTS user_profile
              (id INTEGER PRIMARY KEY CHECK (id = 1), gender TEXT, age INTEGER, 
               height REAL, weight REAL, activity TEXT, target_cal REAL, 
               target_pro REAL, target_fat REAL, target_carb REAL, target_fiber REAL)''')
+conn.commit() # 修复1：强制提交建表操作
 
 # --- 2. 页面设置 ---
 st.set_page_config(page_title="营养分析追踪器", layout="wide", page_icon="🥗")
@@ -64,7 +64,6 @@ if menu == "饮食记录与今日概览":
             if not f_data:
                 st.warning(f"正在录入新食物：【{food_name}】")
                 
-                # --- 新增：自定义单位模块 ---
                 st.write("📌 **第一步：设定计量单位**")
                 u_col1, u_col2 = st.columns(2)
                 with u_col1:
@@ -84,12 +83,10 @@ if menu == "饮食记录与今日概览":
                     r_carb = st.number_input(f"碳水 (g)", 0.0)
                     r_fiber = st.number_input(f"膳食纤维 (g)", 0.0)
                 
-                # 换算逻辑
                 f_cal = r_cal / 4.184 if "kJ" in e_unit else r_cal
                 cal_pg, pro_pg, fat_pg, carb_pg, fiber_pg = [x/base_w for x in [f_cal, r_pro, r_fat, r_carb, r_fiber]]
                 
                 st.divider()
-                # 录入新食物时的摄入量
                 quantity_input = st.number_input(f"🤔 你这次吃了多少【{custom_unit}】?", min_value=0.1, value=1.0)
                 total_weight = quantity_input * weight_per_unit
 
@@ -99,28 +96,27 @@ if menu == "饮食记录与今日概览":
                 
                 st.success(f"✅ 已选中：【{food_name}】 (1 {unit_name} = {weight_per_unit}g)")
                 
-                # 直接按单位输入数量
                 quantity_input = st.number_input(f"🤔 你吃了多少【{unit_name}】?", min_value=0.1, value=1.0)
                 total_weight = quantity_input * weight_per_unit
                 st.caption(f"系统自动折算总重量为: {total_weight:.1f} g")
 
             if st.button("确认添加记录", use_container_width=True, type="primary"):
-                # 如果是新食物，先存入库
                 if not f_data and food_name:
                     c.execute("INSERT INTO food_lib_v2 VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", 
                               (food_name, custom_unit, weight_per_unit, cal_pg, pro_pg, fat_pg, carb_pg, fiber_pg))
                 
-                # 存入每日记录
                 now_date = datetime.now().strftime("%Y-%m-%d")
                 c.execute("INSERT INTO daily_log_v2 (date, name, quantity, unit_name, total_weight, cal, pro, fat, carb, fiber) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                           (now_date, food_name, quantity_input, custom_unit if not f_data else unit_name, total_weight, 
                            cal_pg*total_weight, pro_pg*total_weight, fat_pg*total_weight, carb_pg*total_weight, fiber_pg*total_weight))
+                conn.commit() # 修复2：强制提交食物和记录的写入
                 st.rerun()
 
     with col2:
         st.header("2. 今日摄入与目标达成率")
         today = datetime.now().strftime("%Y-%m-%d")
-        today_df = pd.read_sql_query(f"SELECT * FROM daily_log_v2 WHERE date='{today}'", engine)
+        # 修复3：使用原生 conn 配合 pandas 避免 SQLAlchemy 冲突
+        today_df = pd.read_sql_query(f"SELECT * FROM daily_log_v2 WHERE date='{today}'", conn)
         
         if profile:
             target_cal, target_pro, target_fat, target_carb, target_fiber = profile[6], profile[7], profile[8], profile[9], profile[10]
@@ -167,10 +163,8 @@ if menu == "饮食记录与今日概览":
     with tab_list:
         if not today_df.empty:
             for _, row in today_df.iterrows():
-                # 调整了列宽，让单位和重量显示得更清楚
                 cols = st.columns([1.5, 1.5, 1, 1, 1, 1, 1, 0.5])
                 cols[0].write(f"🍴 {row['name']}")
-                # 显示：1 个 (50.0g)
                 cols[1].write(f"{row['quantity']} {row['unit_name']} ({row['total_weight']}g)")
                 cols[2].write(f"{row['cal']:.0f} kcal")
                 cols[3].write(f"P: {row['pro']:.1f}g")
@@ -179,9 +173,10 @@ if menu == "饮食记录与今日概览":
                 cols[6].write(f"Fb: {row['fiber']:.1f}g")
                 if cols[7].button("🗑️", key=f"del_{row['id']}"):
                     c.execute("DELETE FROM daily_log_v2 WHERE id=%s", (row['id'],))
+                    conn.commit() # 修复4：强制提交删除操作
                     st.rerun()
     with tab_history:
-        all_log = pd.read_sql_query("SELECT * FROM daily_log_v2", engine)
+        all_log = pd.read_sql_query("SELECT * FROM daily_log_v2", conn)
         if not all_log.empty:
             st.plotly_chart(px.bar(all_log.groupby('date').sum(numeric_only=True).reset_index(), x='date', y='cal', title="热量波动趋势"), use_container_width=True)
 
@@ -226,6 +221,7 @@ elif menu == "个人目标设置 (TDEE计算)":
                 c.execute('''INSERT INTO user_profile (id, gender, age, height, weight, activity, target_cal, target_pro, target_fat, target_carb, target_fiber) 
                              VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)''', 
                           (gender, age, height, weight, activity, tdee, t_pro, t_fat, t_carb, t_fiber))
+            conn.commit() # 修复5：强制提交个人设置
             st.balloons()
             st.success("目标已计算并成功保存至云端！")
             st.rerun()
@@ -243,7 +239,7 @@ elif menu == "个人目标设置 (TDEE计算)":
 # --- 5. 食物库管理 ---
 elif menu == "食物库管理(修改/查看)":
     st.header("📦 食物库管理")
-    lib_df = pd.read_sql_query("SELECT * FROM food_lib_v2", engine)
+    lib_df = pd.read_sql_query("SELECT * FROM food_lib_v2", conn)
     if not lib_df.empty:
         display_lib = lib_df.rename(columns={
             'name':'食物名称',
@@ -268,6 +264,7 @@ elif menu == "食物库管理(修改/查看)":
                 '每克膳食纤维':'fiber_per_g'
             })
             c.execute("DELETE FROM food_lib_v2")
+            conn.commit() # 修复6：删除旧库后必须提交，释放锁，否则下面写入会卡死
             final_save.to_sql('food_lib_v2', engine, if_exists='append', index=False)
             st.success("云端库更新成功！")
             st.rerun()
