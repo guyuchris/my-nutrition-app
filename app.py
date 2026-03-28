@@ -11,6 +11,7 @@ engine = create_engine(db_url)
 conn = engine.raw_connection()
 c = conn.cursor()
 
+# 初始化 PostgreSQL 数据表结构
 c.execute('''CREATE TABLE IF NOT EXISTS food_lib_v2 
              (name TEXT PRIMARY KEY, unit_name TEXT, weight_per_unit REAL, 
               cal_per_g REAL, pro_per_g REAL, fat_per_g REAL, carb_per_g REAL, fiber_per_g REAL)''')
@@ -62,6 +63,7 @@ if menu == "饮食记录与今日概览":
 
             if not f_data:
                 st.warning(f"正在录入新食物：【{food_name}】")
+                
                 st.write("📌 **第一步：设定计量单位**")
                 u_col1, u_col2 = st.columns(2)
                 with u_col1:
@@ -90,6 +92,7 @@ if menu == "饮食记录与今日概览":
 
             st.divider()
             st.write("⚖️ **第三步：确认本次摄入量**")
+            
             input_mode = st.radio("请选择计量方式：", [f"按【{active_unit}】数量输入", "直接输入【克(g)】重量"], horizontal=True)
             
             if "克" in input_mode:
@@ -159,34 +162,30 @@ if menu == "饮食记录与今日概览":
             st.info("今天还没有记录哦！")
 
     st.divider()
-    tab_list, tab_history = st.tabs(["📋 今日摄入清单(可直接修改)", "📈 长期趋势统计"])
+    tab_list, tab_history = st.tabs(["📋 今日摄入清单(可直接修改)", "📈 长期趋势统计(数据表)"])
     
     with tab_list:
         if not today_df.empty:
             st.write("💡 **使用提示**：你可以直接在下方表格中双击修改 **[数量]** 或 **[总重(g)]**。勾选最左侧并按键盘 `Delete` 键可以删除该行。修改完成后，点击最下方的【保存】按钮即可自动重算营养！")
             
-            # 构建可供编辑的 DataFrame
             edit_df = today_df[['id', 'name', 'quantity', 'unit_name', 'total_weight', 'cal', 'pro', 'fat', 'carb', 'fiber']].copy()
             edit_df.columns = ['ID', '食物名称', '数量', '单位', '总重(g)', '热量', '蛋白', '脂肪', '碳水', '纤维']
             
-            # 生成交互式表格
             edited_df = st.data_editor(
                 edit_df,
-                disabled=['ID', '食物名称', '单位', '热量', '蛋白', '脂肪', '碳水', '纤维'], # 锁定计算列，仅开放修改数量和重量
+                disabled=['ID', '食物名称', '单位', '热量', '蛋白', '脂肪', '碳水', '纤维'],
                 hide_index=True,
                 num_rows="dynamic",
                 use_container_width=True
             )
             
             if st.button("💾 保存对今日清单的修改", type="primary"):
-                # 处理被删除的行
                 current_ids = edited_df['ID'].tolist()
                 original_ids = edit_df['ID'].tolist()
                 deleted_ids = [i for i in original_ids if i not in current_ids]
                 for d_id in deleted_ids:
                     c.execute("DELETE FROM daily_log_v2 WHERE id=%s", (int(d_id),))
                 
-                # 处理被修改的行，利用修改比例反推并更新全量营养
                 for index, row in edited_df.iterrows():
                     orig_row = edit_df[edit_df['ID'] == row['ID']]
                     if not orig_row.empty:
@@ -215,20 +214,25 @@ if menu == "饮食记录与今日概览":
         else:
             st.info("今日暂无记录。")
 
+    # --- ✨ 修改 1：长期趋势统计改为表格形式 ---
     with tab_history:
         all_log = pd.read_sql_query("SELECT * FROM daily_log_v2", conn)
         if not all_log.empty:
+            st.write("📊 **每日营养摄入统计汇总表**")
+            # 按日期分组求和
             trend_df = all_log.groupby('date').sum(numeric_only=True).reset_index()
+            # 提取需要的列并重命名
+            display_trend = trend_df[['date', 'cal', 'pro', 'fat', 'carb', 'fiber']].copy()
+            display_trend.columns = ['日期', '总热量(kcal)', '蛋白质(g)', '脂肪(g)', '碳水(g)', '膳食纤维(g)']
+            # 格式化数字，保留一位小数
+            display_trend = display_trend.round(1)
+            # 倒序排列，把最新的日期排在最上面
+            display_trend = display_trend.sort_values(by='日期', ascending=False)
             
-            st.write("🔥 **热量摄入总览 (kcal)**")
-            fig_cal = px.bar(trend_df, x='date', y='cal', text_auto='.0f')
-            st.plotly_chart(fig_cal, use_container_width=True)
-            
-            st.write("🥗 **宏观营养素摄入波动 (g)**")
-            plot_df = trend_df.rename(columns={'pro':'蛋白质(g)', 'fat':'脂肪(g)', 'carb':'碳水(g)', 'fiber':'纤维(g)'})
-            fig_macros = px.line(plot_df, x='date', y=['蛋白质(g)', '脂肪(g)', '碳水(g)', '纤维(g)'], markers=True)
-            fig_macros.update_layout(yaxis_title="重量(g)", legend_title="营养元素")
-            st.plotly_chart(fig_macros, use_container_width=True)
+            # 以表格形式展示
+            st.dataframe(display_trend, use_container_width=True, hide_index=True)
+        else:
+            st.info("暂无历史记录。")
 
 # --- 4. 功能模块：个人目标设置 ---
 elif menu == "个人目标设置 (TDEE计算)":
@@ -291,6 +295,7 @@ elif menu == "食物库管理(修改/查看)":
     st.header("📦 食物库管理")
     lib_df = pd.read_sql_query("SELECT * FROM food_lib_v2", conn)
     if not lib_df.empty:
+        st.write("💡 **重要提示：** 当您在此处修改某种食物的成分（如修改了每克热量、纤维等）并点击保存后，**系统会自动同步更新您所有的历史日记记录**，确保营养分析准确无误！")
         display_lib = lib_df.rename(columns={
             'name':'食物名称',
             'unit_name':'单位(如:个)',
@@ -302,7 +307,7 @@ elif menu == "食物库管理(修改/查看)":
             'fiber_per_g':'每克膳食纤维'
         })
         edited_lib = st.data_editor(display_lib, num_rows="dynamic", use_container_width=True)
-        if st.button("保存修改"):
+        if st.button("💾 保存并同步更新所有历史记录", type="primary"):
             final_save = edited_lib.rename(columns={
                 '食物名称':'name',
                 '单位(如:个)':'unit_name',
@@ -316,5 +321,20 @@ elif menu == "食物库管理(修改/查看)":
             c.execute("DELETE FROM food_lib_v2")
             conn.commit() 
             final_save.to_sql('food_lib_v2', engine, if_exists='append', index=False)
-            st.success("云端库更新成功！")
+            
+            # --- ✨ 修改 2：级联更新逻辑，修改库成分后同步更新日记中所有同名食物的营养数据 ---
+            c.execute('''
+                UPDATE daily_log_v2 d
+                SET cal = d.total_weight * f.cal_per_g,
+                    pro = d.total_weight * f.pro_per_g,
+                    fat = d.total_weight * f.fat_per_g,
+                    carb = d.total_weight * f.carb_per_g,
+                    fiber = d.total_weight * f.fiber_per_g
+                FROM food_lib_v2 f
+                WHERE d.name = f.name
+            ''')
+            conn.commit()
+            # ---------------------------------------------------------------------------------
+            
+            st.success("云端食物库已更新！所有历史饮食日记数据也已同步按照新配方重新计算完毕！")
             st.rerun()
