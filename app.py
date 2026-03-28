@@ -11,7 +11,6 @@ engine = create_engine(db_url)
 conn = engine.raw_connection()
 c = conn.cursor()
 
-# 初始化 PostgreSQL 数据表结构
 c.execute('''CREATE TABLE IF NOT EXISTS food_lib_v2 
              (name TEXT PRIMARY KEY, unit_name TEXT, weight_per_unit REAL, 
               cal_per_g REAL, pro_per_g REAL, fat_per_g REAL, carb_per_g REAL, fiber_per_g REAL)''')
@@ -22,7 +21,7 @@ c.execute('''CREATE TABLE IF NOT EXISTS user_profile
              (id INTEGER PRIMARY KEY CHECK (id = 1), gender TEXT, age INTEGER, 
               height REAL, weight REAL, activity TEXT, target_cal REAL, 
               target_pro REAL, target_fat REAL, target_carb REAL, target_fiber REAL)''')
-conn.commit() # 修复1：强制提交建表操作
+conn.commit() 
 
 # --- 2. 页面设置 ---
 st.set_page_config(page_title="营养分析追踪器", layout="wide", page_icon="🥗")
@@ -63,13 +62,12 @@ if menu == "饮食记录与今日概览":
 
             if not f_data:
                 st.warning(f"正在录入新食物：【{food_name}】")
-                
                 st.write("📌 **第一步：设定计量单位**")
                 u_col1, u_col2 = st.columns(2)
                 with u_col1:
-                    custom_unit = st.text_input("日常计量单位", placeholder="例如: 个, 袋, 盒", value="个")
+                    active_unit = st.text_input("日常计量单位", placeholder="例如: 个, 袋, 盒", value="个")
                 with u_col2:
-                    weight_per_unit = st.number_input(f"每一【{custom_unit}】大约多少克(g)?", min_value=0.1, value=50.0)
+                    active_weight_per_unit = st.number_input(f"每一【{active_unit}】大约多少克(g)?", min_value=0.1, value=50.0)
                 
                 st.write("📊 **第二步：录入成分表数据**")
                 u1, u2 = st.columns(2)
@@ -85,37 +83,39 @@ if menu == "饮食记录与今日概览":
                 
                 f_cal = r_cal / 4.184 if "kJ" in e_unit else r_cal
                 cal_pg, pro_pg, fat_pg, carb_pg, fiber_pg = [x/base_w for x in [f_cal, r_pro, r_fat, r_carb, r_fiber]]
-                
-                st.divider()
-                quantity_input = st.number_input(f"🤔 你这次吃了多少【{custom_unit}】?", min_value=0.1, value=1.0)
-                total_weight = quantity_input * weight_per_unit
-
             else:
-                unit_name, weight_per_unit = f_data[1], f_data[2]
+                active_unit, active_weight_per_unit = f_data[1], f_data[2]
                 cal_pg, pro_pg, fat_pg, carb_pg, fiber_pg = f_data[3], f_data[4], f_data[5], f_data[6], f_data[7]
-                
-                st.success(f"✅ 已选中：【{food_name}】 (1 {unit_name} = {weight_per_unit}g)")
-                
-                quantity_input = st.number_input(f"🤔 你吃了多少【{unit_name}】?", min_value=0.1, value=1.0)
-                total_weight = quantity_input * weight_per_unit
+                st.success(f"✅ 已选中：【{food_name}】 (1 {active_unit} = {active_weight_per_unit}g)")
+
+            st.divider()
+            st.write("⚖️ **第三步：确认本次摄入量**")
+            input_mode = st.radio("请选择计量方式：", [f"按【{active_unit}】数量输入", "直接输入【克(g)】重量"], horizontal=True)
+            
+            if "克" in input_mode:
+                total_weight = st.number_input("🤔 你这次吃了多少克 (g)?", min_value=0.1, value=float(active_weight_per_unit), step=10.0)
+                quantity_input = total_weight / active_weight_per_unit
+                st.caption(f"系统自动折算为: {quantity_input:.2f} {active_unit}")
+            else:
+                quantity_input = st.number_input(f"🤔 你这次吃了多少【{active_unit}】?", min_value=0.1, value=1.0, step=0.5)
+                total_weight = quantity_input * active_weight_per_unit
                 st.caption(f"系统自动折算总重量为: {total_weight:.1f} g")
 
             if st.button("确认添加记录", use_container_width=True, type="primary"):
                 if not f_data and food_name:
                     c.execute("INSERT INTO food_lib_v2 VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", 
-                              (food_name, custom_unit, weight_per_unit, cal_pg, pro_pg, fat_pg, carb_pg, fiber_pg))
+                              (food_name, active_unit, active_weight_per_unit, cal_pg, pro_pg, fat_pg, carb_pg, fiber_pg))
                 
                 now_date = datetime.now().strftime("%Y-%m-%d")
                 c.execute("INSERT INTO daily_log_v2 (date, name, quantity, unit_name, total_weight, cal, pro, fat, carb, fiber) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                          (now_date, food_name, quantity_input, custom_unit if not f_data else unit_name, total_weight, 
+                          (now_date, food_name, quantity_input, active_unit, total_weight, 
                            cal_pg*total_weight, pro_pg*total_weight, fat_pg*total_weight, carb_pg*total_weight, fiber_pg*total_weight))
-                conn.commit() # 修复2：强制提交食物和记录的写入
+                conn.commit() 
                 st.rerun()
 
     with col2:
         st.header("2. 今日摄入与目标达成率")
         today = datetime.now().strftime("%Y-%m-%d")
-        # 修复3：使用原生 conn 配合 pandas 避免 SQLAlchemy 冲突
         today_df = pd.read_sql_query(f"SELECT * FROM daily_log_v2 WHERE date='{today}'", conn)
         
         if profile:
@@ -159,26 +159,76 @@ if menu == "饮食记录与今日概览":
             st.info("今天还没有记录哦！")
 
     st.divider()
-    tab_list, tab_history = st.tabs(["📋 今日摄入清单", "📈 长期趋势统计"])
+    tab_list, tab_history = st.tabs(["📋 今日摄入清单(可直接修改)", "📈 长期趋势统计"])
+    
     with tab_list:
         if not today_df.empty:
-            for _, row in today_df.iterrows():
-                cols = st.columns([1.5, 1.5, 1, 1, 1, 1, 1, 0.5])
-                cols[0].write(f"🍴 {row['name']}")
-                cols[1].write(f"{row['quantity']} {row['unit_name']} ({row['total_weight']}g)")
-                cols[2].write(f"{row['cal']:.0f} kcal")
-                cols[3].write(f"P: {row['pro']:.1f}g")
-                cols[4].write(f"F: {row['fat']:.1f}g")
-                cols[5].write(f"C: {row['carb']:.1f}g")
-                cols[6].write(f"Fb: {row['fiber']:.1f}g")
-                if cols[7].button("🗑️", key=f"del_{row['id']}"):
-                    c.execute("DELETE FROM daily_log_v2 WHERE id=%s", (row['id'],))
-                    conn.commit() # 修复4：强制提交删除操作
-                    st.rerun()
+            st.write("💡 **使用提示**：你可以直接在下方表格中双击修改 **[数量]** 或 **[总重(g)]**。勾选最左侧并按键盘 `Delete` 键可以删除该行。修改完成后，点击最下方的【保存】按钮即可自动重算营养！")
+            
+            # 构建可供编辑的 DataFrame
+            edit_df = today_df[['id', 'name', 'quantity', 'unit_name', 'total_weight', 'cal', 'pro', 'fat', 'carb', 'fiber']].copy()
+            edit_df.columns = ['ID', '食物名称', '数量', '单位', '总重(g)', '热量', '蛋白', '脂肪', '碳水', '纤维']
+            
+            # 生成交互式表格
+            edited_df = st.data_editor(
+                edit_df,
+                disabled=['ID', '食物名称', '单位', '热量', '蛋白', '脂肪', '碳水', '纤维'], # 锁定计算列，仅开放修改数量和重量
+                hide_index=True,
+                num_rows="dynamic",
+                use_container_width=True
+            )
+            
+            if st.button("💾 保存对今日清单的修改", type="primary"):
+                # 处理被删除的行
+                current_ids = edited_df['ID'].tolist()
+                original_ids = edit_df['ID'].tolist()
+                deleted_ids = [i for i in original_ids if i not in current_ids]
+                for d_id in deleted_ids:
+                    c.execute("DELETE FROM daily_log_v2 WHERE id=%s", (int(d_id),))
+                
+                # 处理被修改的行，利用修改比例反推并更新全量营养
+                for index, row in edited_df.iterrows():
+                    orig_row = edit_df[edit_df['ID'] == row['ID']]
+                    if not orig_row.empty:
+                        old_qty = orig_row.iloc[0]['数量']
+                        new_qty = row['数量']
+                        old_w = orig_row.iloc[0]['总重(g)']
+                        new_w = row['总重(g)']
+                        
+                        ratio = 1.0
+                        if new_qty != old_qty and old_qty > 0:
+                            ratio = new_qty / old_qty
+                        elif new_w != old_w and old_w > 0:
+                            ratio = new_w / old_w
+                            
+                        if ratio != 1.0:
+                            log_id = int(row['ID'])
+                            c.execute('''UPDATE daily_log_v2 
+                                         SET quantity = quantity * %s, total_weight = total_weight * %s,
+                                             cal = cal * %s, pro = pro * %s, fat = fat * %s,
+                                             carb = carb * %s, fiber = fiber * %s
+                                         WHERE id = %s''', 
+                                      (ratio, ratio, ratio, ratio, ratio, ratio, ratio, log_id))
+                conn.commit() 
+                st.success("今日数据修改已成功同步并重新计算！")
+                st.rerun()
+        else:
+            st.info("今日暂无记录。")
+
     with tab_history:
         all_log = pd.read_sql_query("SELECT * FROM daily_log_v2", conn)
         if not all_log.empty:
-            st.plotly_chart(px.bar(all_log.groupby('date').sum(numeric_only=True).reset_index(), x='date', y='cal', title="热量波动趋势"), use_container_width=True)
+            trend_df = all_log.groupby('date').sum(numeric_only=True).reset_index()
+            
+            st.write("🔥 **热量摄入总览 (kcal)**")
+            fig_cal = px.bar(trend_df, x='date', y='cal', text_auto='.0f')
+            st.plotly_chart(fig_cal, use_container_width=True)
+            
+            st.write("🥗 **宏观营养素摄入波动 (g)**")
+            plot_df = trend_df.rename(columns={'pro':'蛋白质(g)', 'fat':'脂肪(g)', 'carb':'碳水(g)', 'fiber':'纤维(g)'})
+            fig_macros = px.line(plot_df, x='date', y=['蛋白质(g)', '脂肪(g)', '碳水(g)', '纤维(g)'], markers=True)
+            fig_macros.update_layout(yaxis_title="重量(g)", legend_title="营养元素")
+            st.plotly_chart(fig_macros, use_container_width=True)
 
 # --- 4. 功能模块：个人目标设置 ---
 elif menu == "个人目标设置 (TDEE计算)":
@@ -221,7 +271,7 @@ elif menu == "个人目标设置 (TDEE计算)":
                 c.execute('''INSERT INTO user_profile (id, gender, age, height, weight, activity, target_cal, target_pro, target_fat, target_carb, target_fiber) 
                              VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)''', 
                           (gender, age, height, weight, activity, tdee, t_pro, t_fat, t_carb, t_fiber))
-            conn.commit() # 修复5：强制提交个人设置
+            conn.commit() 
             st.balloons()
             st.success("目标已计算并成功保存至云端！")
             st.rerun()
@@ -264,7 +314,7 @@ elif menu == "食物库管理(修改/查看)":
                 '每克膳食纤维':'fiber_per_g'
             })
             c.execute("DELETE FROM food_lib_v2")
-            conn.commit() # 修复6：删除旧库后必须提交，释放锁，否则下面写入会卡死
+            conn.commit() 
             final_save.to_sql('food_lib_v2', engine, if_exists='append', index=False)
             st.success("云端库更新成功！")
             st.rerun()
