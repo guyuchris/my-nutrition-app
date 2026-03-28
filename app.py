@@ -6,20 +6,18 @@ from datetime import datetime, timedelta
 import plotly.express as px
 
 # --- 1. 云端数据库连接配置 ---
-# 从 Streamlit Secrets 中安全读取数据库地址
 db_url = st.secrets["DB_URL"]
-# 创建 SQLAlchemy 引擎（用于 pandas 读写）
 engine = create_engine(db_url)
-# 创建原生连接（用于执行直接的 SQL 指令）
 conn = engine.raw_connection()
 conn.autocommit = True
 c = conn.cursor()
 
-# 初始化 PostgreSQL 数据表结构
-c.execute('''CREATE TABLE IF NOT EXISTS food_lib 
-             (name TEXT PRIMARY KEY, cal_per_g REAL, pro_per_g REAL, fat_per_g REAL, carb_per_g REAL, fiber_per_g REAL)''')
-c.execute('''CREATE TABLE IF NOT EXISTS daily_log 
-             (id SERIAL PRIMARY KEY, date TEXT, name TEXT, weight REAL, 
+# 初始化 PostgreSQL 数据表结构 (升级为 v2 表，增加单位和单件重量字段)
+c.execute('''CREATE TABLE IF NOT EXISTS food_lib_v2 
+             (name TEXT PRIMARY KEY, unit_name TEXT, weight_per_unit REAL, 
+              cal_per_g REAL, pro_per_g REAL, fat_per_g REAL, carb_per_g REAL, fiber_per_g REAL)''')
+c.execute('''CREATE TABLE IF NOT EXISTS daily_log_v2 
+             (id SERIAL PRIMARY KEY, date TEXT, name TEXT, quantity REAL, unit_name TEXT, total_weight REAL, 
               cal REAL, pro REAL, fat REAL, carb REAL, fiber REAL)''')
 c.execute('''CREATE TABLE IF NOT EXISTS user_profile 
              (id INTEGER PRIMARY KEY CHECK (id = 1), gender TEXT, age INTEGER, 
@@ -30,7 +28,6 @@ c.execute('''CREATE TABLE IF NOT EXISTS user_profile
 st.set_page_config(page_title="营养分析追踪器", layout="wide", page_icon="🥗")
 st.title("🍎 个人营养追踪与供能分析系统")
 
-# --- 强制缩小数字字体的 CSS ---
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: 22px !important; }
@@ -49,28 +46,36 @@ if menu == "饮食记录与今日概览":
     with col1:
         st.header("1. 记录饮食")
         
-        c.execute("SELECT name FROM food_lib")
+        c.execute("SELECT name FROM food_lib_v2")
         existing_foods = [row[0] for row in c.fetchall()]
         
         options = ["➕ 手动录入新食物..."] + existing_foods
         selected_option = st.selectbox("选择食物 (支持直接打字搜索)", options)
         
         if selected_option == "➕ 手动录入新食物...":
-            food_name = st.text_input("请输入新食物名称", placeholder="例如：燕麦片")
+            food_name = st.text_input("请输入新食物名称", placeholder="例如：水煮蛋")
         else:
             food_name = selected_option
-            
-        input_weight = st.number_input("摄入重量 (g)", min_value=0.1, value=100.0)
 
         if food_name:
-            c.execute("SELECT * FROM food_lib WHERE name=%s", (food_name,))
+            c.execute("SELECT * FROM food_lib_v2 WHERE name=%s", (food_name,))
             f_data = c.fetchone()
 
             if not f_data:
                 st.warning(f"正在录入新食物：【{food_name}】")
+                
+                # --- 新增：自定义单位模块 ---
+                st.write("📌 **第一步：设定计量单位**")
+                u_col1, u_col2 = st.columns(2)
+                with u_col1:
+                    custom_unit = st.text_input("日常计量单位", placeholder="例如: 个, 袋, 盒", value="个")
+                with u_col2:
+                    weight_per_unit = st.number_input(f"每一【{custom_unit}】大约多少克(g)?", min_value=0.1, value=50.0)
+                
+                st.write("📊 **第二步：录入成分表数据**")
                 u1, u2 = st.columns(2)
                 with u1:
-                    base_w = st.number_input("基准重量 (g)", value=100.0)
+                    base_w = st.number_input("成分表基准重量 (g)", value=100.0)
                     e_unit = st.selectbox("热量单位", ["kcal", "kJ"])
                 with u2:
                     r_cal = st.number_input(f"热量 (每{base_w}g)", 0.0)
@@ -79,24 +84,43 @@ if menu == "饮食记录与今日概览":
                     r_carb = st.number_input(f"碳水 (g)", 0.0)
                     r_fiber = st.number_input(f"膳食纤维 (g)", 0.0)
                 
+                # 换算逻辑
                 f_cal = r_cal / 4.184 if "kJ" in e_unit else r_cal
                 cal_pg, pro_pg, fat_pg, carb_pg, fiber_pg = [x/base_w for x in [f_cal, r_pro, r_fat, r_carb, r_fiber]]
-            else:
-                st.success(f"✅ 已选中食物库：【{food_name}】")
-                cal_pg, pro_pg, fat_pg, carb_pg, fiber_pg = f_data[1], f_data[2], f_data[3], f_data[4], f_data[5]
+                
+                st.divider()
+                # 录入新食物时的摄入量
+                quantity_input = st.number_input(f"🤔 你这次吃了多少【{custom_unit}】?", min_value=0.1, value=1.0)
+                total_weight = quantity_input * weight_per_unit
 
-            if st.button("确认添加记录", use_container_width=True):
+            else:
+                unit_name, weight_per_unit = f_data[1], f_data[2]
+                cal_pg, pro_pg, fat_pg, carb_pg, fiber_pg = f_data[3], f_data[4], f_data[5], f_data[6], f_data[7]
+                
+                st.success(f"✅ 已选中：【{food_name}】 (1 {unit_name} = {weight_per_unit}g)")
+                
+                # 直接按单位输入数量
+                quantity_input = st.number_input(f"🤔 你吃了多少【{unit_name}】?", min_value=0.1, value=1.0)
+                total_weight = quantity_input * weight_per_unit
+                st.caption(f"系统自动折算总重量为: {total_weight:.1f} g")
+
+            if st.button("确认添加记录", use_container_width=True, type="primary"):
+                # 如果是新食物，先存入库
                 if not f_data and food_name:
-                    c.execute("INSERT INTO food_lib VALUES (%s,%s,%s,%s,%s,%s)", (food_name, cal_pg, pro_pg, fat_pg, carb_pg, fiber_pg))
+                    c.execute("INSERT INTO food_lib_v2 VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", 
+                              (food_name, custom_unit, weight_per_unit, cal_pg, pro_pg, fat_pg, carb_pg, fiber_pg))
+                
+                # 存入每日记录
                 now_date = datetime.now().strftime("%Y-%m-%d")
-                c.execute("INSERT INTO daily_log (date, name, weight, cal, pro, fat, carb, fiber) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                          (now_date, food_name, input_weight, cal_pg*input_weight, pro_pg*input_weight, fat_pg*input_weight, carb_pg*input_weight, fiber_pg*input_weight))
+                c.execute("INSERT INTO daily_log_v2 (date, name, quantity, unit_name, total_weight, cal, pro, fat, carb, fiber) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                          (now_date, food_name, quantity_input, custom_unit if not f_data else unit_name, total_weight, 
+                           cal_pg*total_weight, pro_pg*total_weight, fat_pg*total_weight, carb_pg*total_weight, fiber_pg*total_weight))
                 st.rerun()
 
     with col2:
         st.header("2. 今日摄入与目标达成率")
         today = datetime.now().strftime("%Y-%m-%d")
-        today_df = pd.read_sql_query(f"SELECT * FROM daily_log WHERE date='{today}'", engine)
+        today_df = pd.read_sql_query(f"SELECT * FROM daily_log_v2 WHERE date='{today}'", engine)
         
         if profile:
             target_cal, target_pro, target_fat, target_carb, target_fiber = profile[6], profile[7], profile[8], profile[9], profile[10]
@@ -143,19 +167,21 @@ if menu == "饮食记录与今日概览":
     with tab_list:
         if not today_df.empty:
             for _, row in today_df.iterrows():
-                cols = st.columns([2, 1, 1, 1, 1, 1, 1, 0.5])
+                # 调整了列宽，让单位和重量显示得更清楚
+                cols = st.columns([1.5, 1.5, 1, 1, 1, 1, 1, 0.5])
                 cols[0].write(f"🍴 {row['name']}")
-                cols[1].write(f"{row['weight']}g")
-                cols[2].write(f"{row['cal']:.1f} kcal")
+                # 显示：1 个 (50.0g)
+                cols[1].write(f"{row['quantity']} {row['unit_name']} ({row['total_weight']}g)")
+                cols[2].write(f"{row['cal']:.0f} kcal")
                 cols[3].write(f"P: {row['pro']:.1f}g")
                 cols[4].write(f"F: {row['fat']:.1f}g")
                 cols[5].write(f"C: {row['carb']:.1f}g")
                 cols[6].write(f"Fb: {row['fiber']:.1f}g")
                 if cols[7].button("🗑️", key=f"del_{row['id']}"):
-                    c.execute("DELETE FROM daily_log WHERE id=%s", (row['id'],))
+                    c.execute("DELETE FROM daily_log_v2 WHERE id=%s", (row['id'],))
                     st.rerun()
     with tab_history:
-        all_log = pd.read_sql_query("SELECT * FROM daily_log", engine)
+        all_log = pd.read_sql_query("SELECT * FROM daily_log_v2", engine)
         if not all_log.empty:
             st.plotly_chart(px.bar(all_log.groupby('date').sum(numeric_only=True).reset_index(), x='date', y='cal', title="热量波动趋势"), use_container_width=True)
 
@@ -191,7 +217,6 @@ elif menu == "个人目标设置 (TDEE计算)":
             t_pro, t_fat, t_carb = (tdee * 0.20) / 4, (tdee * 0.30) / 9, (tdee * 0.50) / 4
             t_fiber = (tdee / 1000) * 14 
             
-            # PostgreSQL 专门的更新写入逻辑
             c.execute("SELECT id FROM user_profile WHERE id=1")
             if c.fetchone():
                 c.execute('''UPDATE user_profile SET gender=%s, age=%s, height=%s, weight=%s, activity=%s, 
@@ -218,13 +243,31 @@ elif menu == "个人目标设置 (TDEE计算)":
 # --- 5. 食物库管理 ---
 elif menu == "食物库管理(修改/查看)":
     st.header("📦 食物库管理")
-    lib_df = pd.read_sql_query("SELECT * FROM food_lib", engine)
+    lib_df = pd.read_sql_query("SELECT * FROM food_lib_v2", engine)
     if not lib_df.empty:
-        display_lib = lib_df.rename(columns={'name':'食物名称','cal_per_g':'每克热量','pro_per_g':'每克蛋白','fat_per_g':'每克脂肪','carb_per_g':'每克碳水','fiber_per_g':'每克膳食纤维'})
+        display_lib = lib_df.rename(columns={
+            'name':'食物名称',
+            'unit_name':'单位(如:个)',
+            'weight_per_unit':'单件重量(g)',
+            'cal_per_g':'每克热量',
+            'pro_per_g':'每克蛋白',
+            'fat_per_g':'每克脂肪',
+            'carb_per_g':'每克碳水',
+            'fiber_per_g':'每克膳食纤维'
+        })
         edited_lib = st.data_editor(display_lib, num_rows="dynamic", use_container_width=True)
         if st.button("保存修改"):
-            final_save = edited_lib.rename(columns={'食物名称':'name','每克热量':'cal_per_g','每克蛋白':'pro_per_g','每克脂肪':'fat_per_g','每克碳水':'carb_per_g','每克膳食纤维':'fiber_per_g'})
-            c.execute("DELETE FROM food_lib")
-            final_save.to_sql('food_lib', engine, if_exists='append', index=False)
+            final_save = edited_lib.rename(columns={
+                '食物名称':'name',
+                '单位(如:个)':'unit_name',
+                '单件重量(g)':'weight_per_unit',
+                '每克热量':'cal_per_g',
+                '每克蛋白':'pro_per_g',
+                '每克脂肪':'fat_per_g',
+                '每克碳水':'carb_per_g',
+                '每克膳食纤维':'fiber_per_g'
+            })
+            c.execute("DELETE FROM food_lib_v2")
+            final_save.to_sql('food_lib_v2', engine, if_exists='append', index=False)
             st.success("云端库更新成功！")
             st.rerun()
