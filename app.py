@@ -290,7 +290,10 @@ elif menu == "个人目标设置 (TDEE计算)":
 elif menu == "食物库管理(修改/查看)":
     st.header("📦 食物库管理")
     lib_df = pd.read_sql_query("SELECT * FROM food_lib_v2", conn)
+    
+    # 增加空状态提示，再也不会一片空白了
     if not lib_df.empty:
+        st.write("💡 **重要提示：** 当您在此处修改某种食物的成分（如修改了每克热量、纤维等）并点击保存后，**系统会自动同步更新您所有的历史日记记录**，确保营养分析准确无误！")
         display_lib = lib_df.rename(columns={
             'name':'食物名称',
             'unit_name':'单位(如:个)',
@@ -302,7 +305,8 @@ elif menu == "食物库管理(修改/查看)":
             'fiber_per_g':'每克膳食纤维'
         })
         edited_lib = st.data_editor(display_lib, num_rows="dynamic", use_container_width=True)
-        if st.button("保存修改"):
+        
+        if st.button("💾 保存并同步更新所有历史记录", type="primary"):
             final_save = edited_lib.rename(columns={
                 '食物名称':'name',
                 '单位(如:个)':'unit_name',
@@ -313,8 +317,48 @@ elif menu == "食物库管理(修改/查看)":
                 '每克碳水':'carb_per_g',
                 '每克膳食纤维':'fiber_per_g'
             })
-            c.execute("DELETE FROM food_lib_v2")
-            conn.commit() 
-            final_save.to_sql('food_lib_v2', engine, if_exists='append', index=False)
-            st.success("云端库更新成功！")
+            
+            # --- ✨ 终极防丢写法：使用原生 SQL 逐行 Upsert (冲突则更新)，绝不粗暴删库 ---
+            for _, row in final_save.iterrows():
+                c.execute('''
+                    INSERT INTO food_lib_v2 (name, unit_name, weight_per_unit, cal_per_g, pro_per_g, fat_per_g, carb_per_g, fiber_per_g)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (name) DO UPDATE SET
+                        unit_name=EXCLUDED.unit_name,
+                        weight_per_unit=EXCLUDED.weight_per_unit,
+                        cal_per_g=EXCLUDED.cal_per_g,
+                        pro_per_g=EXCLUDED.pro_per_g,
+                        fat_per_g=EXCLUDED.fat_per_g,
+                        carb_per_g=EXCLUDED.carb_per_g,
+                        fiber_per_g=EXCLUDED.fiber_per_g
+                ''', tuple(row))
+            conn.commit()
+            
+            # 处理被用户在表格中按 Delete 键彻底删掉的食物
+            existing_names = final_save['name'].tolist()
+            if existing_names:
+                old_names = lib_df['name'].tolist()
+                deleted_names = [n for n in old_names if n not in existing_names]
+                for dn in deleted_names:
+                    c.execute("DELETE FROM food_lib_v2 WHERE name=%s", (dn,))
+                conn.commit()
+
+            # --- ✨ 级联更新逻辑：用最新食物库重新核算日记表 ---
+            c.execute('''
+                UPDATE daily_log_v2 d
+                SET cal = d.total_weight * f.cal_per_g,
+                    pro = d.total_weight * f.pro_per_g,
+                    fat = d.total_weight * f.fat_per_g,
+                    carb = d.total_weight * f.carb_per_g,
+                    fiber = d.total_weight * f.fiber_per_g
+                FROM food_lib_v2 f
+                WHERE d.name = f.name
+            ''')
+            conn.commit()
+            # ---------------------------------------------------------------------------------
+            
+            st.success("云端食物库已完美更新！所有历史饮食日记数据也已同步重新计算完毕！")
             st.rerun()
+    else:
+        # 这个提示能防止页面崩溃变白
+        st.info("🍎 食物库目前是空的。请先去左侧『饮食记录与今日概览』页面随便添加一个新食物，这里就会恢复显示啦！")
